@@ -1,9 +1,10 @@
 import streamlit as st
 from docx import Document
-from docx.shared import Mm
+from docx.shared import Mm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL
 import io
-from PIL import Image, ImageOps # Новые библиотеки для выравнивания фото
+from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Эксперт - Фотоотчет", layout="wide", initial_sidebar_state="collapsed")
 
@@ -28,25 +29,31 @@ CAPTION_OPTIONS = [
     "на площади от 20 до 30%", "на площади от 30 до 40%", "на площади более 40%"
 ]
 
-# Железобетонная инициализация памяти
 if "photo_order" not in st.session_state:
-    st.session_state.photo_order = []  # Хранит ID файлов по порядку
+    st.session_state.photo_order = []  
 if "processed_ids" not in st.session_state:
-    st.session_state.processed_ids = set() # Хранит ID уже загруженных файлов
+    st.session_state.processed_ids = set() 
 if "photo_data" not in st.session_state:
-    st.session_state.photo_data = {} # Хранит сами картинки в памяти
+    st.session_state.photo_data = {} 
 
-# --- ФУНКЦИЯ ДЛЯ ВЫРАВНИВАНИЯ ФОТО (EXIF FIX) ---
-def fix_image_rotation(uploaded_file):
+# --- УМНАЯ ОБРЕЗКА ФОТО 1:1 И ВЫРАВНИВАНИЕ ---
+def process_and_crop_image(uploaded_file):
     image = Image.open(uploaded_file)
-    # Читаем EXIF телефона и поворачиваем фото как надо
-    image = ImageOps.exif_transpose(image)
+    image = ImageOps.exif_transpose(image) # Выравниваем горизонт
     
-    # Если формат PNG/RGBA, переводим в обычный RGB
     if image.mode in ("RGBA", "P"):
         image = image.convert("RGB")
         
-    # Сохраняем готовую ровную картинку в буфер
+    # --- Делаем идеальный квадрат (1:1) по центру ---
+    width, height = image.size
+    min_dim = min(width, height)
+    left = (width - min_dim) / 2
+    top = (height - min_dim) / 2
+    right = (width + min_dim) / 2
+    bottom = (height + min_dim) / 2
+    image = image.crop((left, top, right, bottom))
+    # ------------------------------------------------
+    
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='JPEG', quality=85)
     img_byte_arr.seek(0)
@@ -61,12 +68,10 @@ def move_photo(file_id, current_index):
     if new_index != current_index:
         item = st.session_state.photo_order.pop(current_index)
         st.session_state.photo_order.insert(new_index, item)
-        # Пересчитываем позиции виджетов
         for idx, fid in enumerate(st.session_state.photo_order):
             st.session_state[f"pos_{fid}"] = idx + 1
 
 def delete_photo(file_id):
-    # Полностью удаляем фото из памяти приложения
     if file_id in st.session_state.photo_order:
         st.session_state.photo_order.remove(file_id)
     if file_id in st.session_state.processed_ids:
@@ -74,26 +79,21 @@ def delete_photo(file_id):
     if file_id in st.session_state.photo_data:
         del st.session_state.photo_data[file_id]
         
-    # Пересчитываем оставшиеся позиции
     for idx, fid in enumerate(st.session_state.photo_order):
         st.session_state[f"pos_{fid}"] = idx + 1
 
-# --- ЗАГРУЗКА ФОТОГРАФИЙ ---
+# --- ЗАГРУЗКА ---
 uploaded_photos = st.file_uploader("Сделать снимок или выбрать из галереи", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_photos:
     for uf in uploaded_photos:
-        # Если этого фото еще нет в нашей памяти (проверяем по ID)
         if uf.file_id not in st.session_state.processed_ids:
-            # 1. Выравниваем и сжимаем фото
-            fixed_bytes = fix_image_rotation(uf)
+            # Вызываем нашу новую функцию с обрезкой 1:1
+            fixed_bytes = process_and_crop_image(uf)
             
-            # 2. Сохраняем в "копилку" (теперь оно не исчезнет)
             st.session_state.processed_ids.add(uf.file_id)
             st.session_state.photo_data[uf.file_id] = fixed_bytes
             st.session_state.photo_order.append(uf.file_id)
-            
-            # 3. Присваиваем позицию для нового фото
             st.session_state[f"pos_{uf.file_id}"] = len(st.session_state.photo_order)
 
 photo_data_list = []
@@ -101,7 +101,6 @@ photo_data_list = []
 if st.session_state.photo_order:
     st.write("Настройте подписи и порядок фотографий:")
     
-    # Отрисовываем фото из нашей "копилки", а не из загрузчика
     for i, file_id in enumerate(list(st.session_state.photo_order)):
         img_bytes = st.session_state.photo_data[file_id]
         
@@ -136,7 +135,6 @@ if st.session_state.photo_order:
                     
             st.divider() 
             
-            # Собираем данные для генерации документа
             photo_data_list.append({"bytes": img_bytes, "caption": final_caption})
 
 # --- ГЕНЕРАЦИЯ ОТЧЕТА ---
@@ -145,37 +143,49 @@ if photo_data_list:
         try:
             doc = Document()
             
-            heading = doc.add_heading(f"Фотоотчет осмотра: {reg_num if reg_num else 'Автомобиль'}", level=1)
-            heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # Заголовок удален!
             
+            # Создаем таблицу
             table = doc.add_table(rows=0, cols=2)
             table.style = 'Table Grid'
             
             for i in range(0, len(photo_data_list), 2):
                 cells = table.add_row().cells
                 
-                # Левая ячейка
+                # --- ЛЕВАЯ ЯЧЕЙКА ---
+                cells[0].vertical_alignment = WD_ALIGN_VERTICAL.CENTER # Выравниваем ячейку по вертикали
+                p1 = cells[0].paragraphs[0]
+                p1.alignment = WD_ALIGN_PARAGRAPH.CENTER # Выравниваем по центру
+                p1.paragraph_format.space_after = Pt(0) # Убираем лишние отступы снизу
+                
                 img1_file = photo_data_list[i]["bytes"]
                 img1_file.seek(0)
                 
-                p1 = cells[0].paragraphs[0]
-                p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run1 = p1.add_run()
-                run1.add_picture(img1_file, width=Mm(80))
-                run1.add_break()
-                run1.add_text(photo_data_list[i]["caption"])
+                # Вставляем фото (ширина 80мм, так как фото 1:1, высота тоже будет 80мм)
+                run1_img = p1.add_run()
+                run1_img.add_picture(img1_file, width=Mm(80))
                 
-                # Правая ячейка
-                p2 = cells[1].paragraphs[0]
-                p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                # Вставляем текст
+                run1_text = p1.add_run("\n" + photo_data_list[i]["caption"])
+                run1_text.font.name = 'Cambria' # Устанавливаем шрифт
+                run1_text.font.size = Pt(8)     # Устанавливаем размер 8
+                
+                # --- ПРАВАЯ ЯЧЕЙКА ---
                 if i + 1 < len(photo_data_list):
+                    cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                    p2 = cells[1].paragraphs[0]
+                    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p2.paragraph_format.space_after = Pt(0)
+                    
                     img2_file = photo_data_list[i+1]["bytes"]
                     img2_file.seek(0)
                     
-                    run2 = p2.add_run()
-                    run2.add_picture(img2_file, width=Mm(80))
-                    run2.add_break()
-                    run2.add_text(photo_data_list[i+1]["caption"])
+                    run2_img = p2.add_run()
+                    run2_img.add_picture(img2_file, width=Mm(80))
+                    
+                    run2_text = p2.add_run("\n" + photo_data_list[i+1]["caption"])
+                    run2_text.font.name = 'Cambria'
+                    run2_text.font.size = Pt(8)
             
             buffer = io.BytesIO()
             doc.save(buffer)
